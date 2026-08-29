@@ -1,0 +1,7 @@
+{
+  "name": "Progressive Overload Calisthenics Tracker",
+  "description": "Minimalist offline Android Jetpack Compose and Room Database workout logger for calisthenics progressive overload.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
