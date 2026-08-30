@@ -46,3 +46,46 @@ export interface WorkoutSessionWithLogs {
     exerciseName: string;
   }[];
 }
+
+export interface WorkoutScheduleEntity {
+  id: number;
+  dayOfWeek: number; // 0: Minggu, 1: Senin, 2: Selasa, 3: Rabu, 4: Kamis, 5: Jumat, 6: Sabtu
+  dayName: string;
+  time: string; // HH:mm format, e.g. "06:30"
+  reminderMinutesBefore: number; // e.g. 0, 10, 15, 30, 60
+  isEnabled: boolean;
+  exerciseFocus: string; // e.g. "Full Body", "Upper Calisthenics", "Push & Core"
+}
+
+export interface WeeklyMetricComparison {
+  thisWeek: number;
+  lastWeek: number;
+  diff: number;
+  percentageChange: number;
+}
+
+export interface ExerciseWeeklyMatrixRow {
+  exerciseId: number;
+  exerciseName: string;
+  thisWeekReps: number;
+  lastWeekReps: number;
+  diffReps: number;
+  percentageRepsChange: number;
+  thisWeekSets: number;
+  lastWeekSets: number;
+  diffSets: number;
+  status: 'overload' | 'maintained' | 'regressed' | 'new';
+}
+
+export interface WeeklyComparisonReport {
+  thisWeekLabel: string;
+  lastWeekLabel: string;
+  totalDurationSeconds: WeeklyMetricComparison;
+  totalReps: WeeklyMetricComparison;
+  totalSets: WeeklyMetricComparison;
+  totalSessions: WeeklyMetricComparison;
+  averageRepsPerSet: WeeklyMetricComparison;
+  exercisesMatrix: ExerciseWeeklyMatrixRow[];
+  overallStatus: 'overload' | 'maintained' | 'regressed';
+  summaryInsight: string;
+}

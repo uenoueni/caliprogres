@@ -1,31 +1,51 @@
-import { useState, useEffect, useCallback } from 'react';
-import { TopAppBar } from './components/TopAppBar';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { TopAppBar, AppNavTab } from './components/TopAppBar';
 import { ExerciseCard } from './components/ExerciseCard';
 import { WorkoutSessionTracker } from './components/WorkoutSessionTracker';
 import { HistoryBottomSheet } from './components/HistoryBottomSheet';
 import { SessionHistoryModal } from './components/SessionHistoryModal';
 import { AddExerciseModal } from './components/AddExerciseModal';
 import { KotlinArchitectureModal } from './components/KotlinArchitectureModal';
+import { WeeklyReportView } from './components/WeeklyReportView';
+import { ScheduleView } from './components/ScheduleView';
 import { Toast } from './components/Toast';
 import { roomDb } from './db/roomDatabase';
-import { ExerciseEntity, ExerciseWithLatestLog, WorkoutLogEntity, WorkoutSessionWithLogs } from './types';
+import {
+  ExerciseEntity,
+  ExerciseWithLatestLog,
+  WorkoutLogEntity,
+  WorkoutSessionWithLogs,
+  WorkoutScheduleEntity,
+  WeeklyComparisonReport,
+} from './types';
 import { Dumbbell, Info, Plus } from 'lucide-react';
+import { sendLocalNotification } from './utils/notificationService';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'app' | 'kotlin'>('app');
+  const [activeTab, setActiveTab] = useState<AppNavTab>('workout');
   const [exercisesWithLogs, setExercisesWithLogs] = useState<ExerciseWithLatestLog[]>([]);
   const [selectedExerciseForHistory, setSelectedExerciseForHistory] = useState<ExerciseEntity | null>(null);
   const [historyLogs, setHistoryLogs] = useState<WorkoutLogEntity[]>([]);
   const [sessionHistory, setSessionHistory] = useState<WorkoutSessionWithLogs[]>([]);
   const [activeSession, setActiveSession] = useState<{ id: number; startTime: number } | null>(null);
+  const [weeklyReport, setWeeklyReport] = useState<WeeklyComparisonReport | null>(null);
+  const [schedules, setSchedules] = useState<WorkoutScheduleEntity[]>([]);
 
   // Modals state
   const [isAddExerciseOpen, setIsAddExerciseOpen] = useState<boolean>(false);
   const [isSessionHistoryOpen, setIsSessionHistoryOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'info' | 'warning'>('info');
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Load all exercises, latest logs, and session history
+  const triggeredRemindersRef = useRef<Set<string>>(new Set());
+
+  const showToast = (message: string, type: 'success' | 'info' | 'warning' = 'info') => {
+    setToastType(type);
+    setToastMessage(message);
+  };
+
+  // Load all exercises, latest logs, session history, weekly report & schedules
   const refreshData = useCallback(async () => {
     setIsLoading(true);
     const exercises = await roomDb.getAllExercises();
@@ -46,10 +66,14 @@ export default function App() {
 
     const sessions = await roomDb.getAllSessionsWithLogs();
     const active = roomDb.getActiveSession();
+    const report = await roomDb.getWeeklyComparisonReport();
+    const loadedSchedules = await roomDb.getAllSchedules();
 
     setExercisesWithLogs(loadedData);
     setSessionHistory(sessions);
     setActiveSession(active);
+    setWeeklyReport(report);
+    setSchedules(loadedSchedules);
     setIsLoading(false);
   }, []);
 
@@ -57,11 +81,51 @@ export default function App() {
     refreshData();
   }, [refreshData]);
 
+  // Client-side live workout reminder scheduler (runs every 30s)
+  useEffect(() => {
+    const checkScheduledReminders = () => {
+      const now = new Date();
+      const currentDayOfWeek = now.getDay(); // 0-6
+      const currentHours = now.getHours();
+      const currentMinutes = now.getMinutes();
+      const currentTotalMins = currentHours * 60 + currentMinutes;
+
+      for (const sch of schedules) {
+        if (!sch.isEnabled) continue;
+        if (sch.dayOfWeek !== currentDayOfWeek) continue;
+
+        const [schHours, schMins] = sch.time.split(':').map(Number);
+        const scheduleTotalMins = schHours * 60 + schMins;
+        const targetReminderMins = scheduleTotalMins - sch.reminderMinutesBefore;
+
+        const reminderKey = `${sch.id}_${now.toDateString()}_${sch.time}`;
+
+        // If current minute matches target reminder time and hasn't triggered today
+        if (currentTotalMins === targetReminderMins && !triggeredRemindersRef.current.has(reminderKey)) {
+          triggeredRemindersRef.current.add(reminderKey);
+
+          const title = `🏋️ Pengingat Latihan: ${sch.dayName}`;
+          const body = sch.reminderMinutesBefore > 0
+            ? `Sesi latihan "${sch.exerciseFocus}" akan dimulai dalam ${sch.reminderMinutesBefore} menit (${sch.time})!`
+            : `Waktunya latihan "${sch.exerciseFocus}" sekarang (${sch.time})!`;
+
+          sendLocalNotification(title, { body });
+          showToast(`🔔 ${title}: ${body}`, 'info');
+        }
+      }
+    };
+
+    const interval = setInterval(checkScheduledReminders, 30000);
+    checkScheduledReminders(); // check immediately on mount/update
+
+    return () => clearInterval(interval);
+  }, [schedules]);
+
   // Start a new workout session
   const handleStartSession = async () => {
     const session = await roomDb.startWorkoutSession();
     setActiveSession(session);
-    setToastMessage('🚀 Sesi latihan dimulai! Timer & riwayat sesi sedang berjalan.');
+    showToast('🚀 Sesi latihan dimulai! Timer & riwayat sesi sedang berjalan.', 'success');
   };
 
   // End active workout session
@@ -72,8 +136,9 @@ export default function App() {
       const mins = Math.floor(completedSession.durationSeconds / 60);
       const secs = completedSession.durationSeconds % 60;
       const durationStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-      setToastMessage(
-        `🎉 Sesi latihan #${completedSession.id} selesai! Durasi: ${durationStr}, Total: ${completedSession.totalReps} repetisi.`
+      showToast(
+        `🎉 Sesi latihan #${completedSession.id} selesai! Durasi: ${durationStr}, Total: ${completedSession.totalReps} repetisi.`,
+        'success'
       );
     }
   };
@@ -82,7 +147,7 @@ export default function App() {
   const handleCancelSession = async () => {
     await roomDb.cancelWorkoutSession();
     setActiveSession(null);
-    setToastMessage('Sesi latihan dibatalkan.');
+    showToast('Sesi latihan dibatalkan.', 'warning');
   };
 
   // Save workout reps for an exercise
@@ -106,21 +171,21 @@ export default function App() {
     await refreshData();
 
     const totalReps = set1 + set2 + set3;
-    setToastMessage(`✓ ${exercise.name}: ${totalReps} total repetisi berhasil disimpan!`);
+    showToast(`✓ ${exercise.name}: ${totalReps} total repetisi berhasil disimpan!`, 'success');
   };
 
   // Add new custom exercise
   const handleAddExercise = async (name: string) => {
     const newEx = await roomDb.insertExercise(name);
     await refreshData();
-    setToastMessage(`Gerakan "${newEx.name}" berhasil ditambahkan ke database Room!`);
+    showToast(`Gerakan "${newEx.name}" berhasil ditambahkan ke database Room!`, 'success');
   };
 
   // Delete exercise
   const handleDeleteExercise = async (exerciseId: number) => {
     await roomDb.deleteExercise(exerciseId);
     await refreshData();
-    setToastMessage('Gerakan custom berhasil dihapus');
+    showToast('Gerakan custom berhasil dihapus', 'info');
   };
 
   // Open history bottom sheet for a single exercise
@@ -144,22 +209,42 @@ export default function App() {
       setHistoryLogs(updatedLogs);
     }
     await refreshData();
-    setToastMessage('Catatan latihan berhasil dihapus');
+    showToast('Catatan latihan berhasil dihapus', 'info');
   };
 
   // Delete whole session
   const handleDeleteSession = async (sessionId: number) => {
     await roomDb.deleteSession(sessionId);
     await refreshData();
-    setToastMessage(`Sesi #${sessionId} berhasil dihapus.`);
+    showToast(`Sesi #${sessionId} berhasil dihapus.`, 'info');
+  };
+
+  // Schedule management handlers
+  const handleSaveSchedule = async (
+    schedule: Omit<WorkoutScheduleEntity, 'id'> & { id?: number }
+  ) => {
+    await roomDb.insertOrUpdateSchedule(schedule);
+    await refreshData();
+  };
+
+  const handleToggleSchedule = async (id: number, isEnabled: boolean) => {
+    await roomDb.toggleSchedule(id, isEnabled);
+    await refreshData();
+    showToast(isEnabled ? 'Jadwal diaktifkan' : 'Jadwal dinonaktifkan', 'info');
+  };
+
+  const handleDeleteSchedule = async (id: number) => {
+    await roomDb.deleteSchedule(id);
+    await refreshData();
+    showToast('Jadwal latihan berhasil dihapus', 'info');
   };
 
   // Reset database to default initial state
   const handleResetData = async () => {
-    if (window.confirm('Reset database ke 5 gerakan default awal?')) {
+    if (window.confirm('Reset database ke data sample awal (gerakan default, jadwal rutin, & riwayat)?')) {
       await roomDb.resetToDefaults();
       await refreshData();
-      setToastMessage('Database berhasil direset ke data default');
+      showToast('Database berhasil direset ke data default', 'success');
     }
   };
 
@@ -177,7 +262,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-neutral-100 flex flex-col font-['Plus_Jakarta_Sans',sans-serif]">
-      {/* Top App Bar with Date, Add Exercise, Session History & Mode Selector */}
+      {/* Top App Bar with Date, Add Exercise, Session History & Tabs */}
       <TopAppBar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -185,13 +270,31 @@ export default function App() {
         onOpenAddExercise={() => setIsAddExerciseOpen(true)}
         onOpenSessionHistory={() => setIsSessionHistoryOpen(true)}
         sessionCount={sessionHistory.length}
+        hasOverload={weeklyReport?.overallStatus === 'overload'}
       />
 
       {/* Main Container */}
-      <main className="flex-1 max-w-3xl w-full mx-auto px-4 py-5 sm:px-6">
-        {activeTab === 'kotlin' ? (
-          <KotlinArchitectureModal />
-        ) : (
+      <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-5 sm:px-6">
+        {activeTab === 'kotlin' && <KotlinArchitectureModal />}
+
+        {activeTab === 'report' && (
+          <WeeklyReportView
+            report={weeklyReport}
+            onRefresh={refreshData}
+          />
+        )}
+
+        {activeTab === 'schedule' && (
+          <ScheduleView
+            schedules={schedules}
+            onSaveSchedule={handleSaveSchedule}
+            onToggleSchedule={handleToggleSchedule}
+            onDeleteSchedule={handleDeleteSchedule}
+            onShowToast={showToast}
+          />
+        )}
+
+        {activeTab === 'workout' && (
           <div className="space-y-4">
             {/* Start / Active / End Workout Session Tracker */}
             <WorkoutSessionTracker
@@ -207,10 +310,10 @@ export default function App() {
             <div className="flex items-center justify-between px-1 pt-1">
               <div>
                 <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                  Daftar Gerakan ({exercisesWithLogs.length})
+                  Daftar Gerakan Kalistenik ({exercisesWithLogs.length})
                 </h2>
                 <p className="text-[11px] text-neutral-400">
-                  Klik nama gerakan untuk melihat riwayat repetisi per gerakan
+                  Klik nama gerakan untuk melihat grafik riwayat repetisi per gerakan
                 </p>
               </div>
 
@@ -251,7 +354,7 @@ export default function App() {
             <div className="mt-8 p-4 rounded-xl bg-neutral-200/50 border border-neutral-200/80 text-xs text-neutral-600 flex items-start gap-2.5">
               <Info className="w-4 h-4 text-neutral-500 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
-                <strong>Progressive Overload & Session Tracking:</strong> Tekan <strong>Start Workout</strong> saat memulai sesi, catat repetisi untuk setiap gerakan, lalu tekan <strong>End Workout</strong> untuk menyimpan riwayat 1 sesi latihan utuh. Anda juga bisa melihat riwayat per gerakan kapan saja.
+                <strong>Progressive Overload & Laporan Mingguan:</strong> Catat repetisi 3 set setiap sesi. Buka tab <strong>Weekly Report</strong> untuk melihat tabel matriks pembanding volume antara minggu ini vs minggu kemarin serta kenaikan overload Anda.
               </p>
             </div>
           </div>
@@ -284,8 +387,10 @@ export default function App() {
       {/* Toast feedback */}
       <Toast
         message={toastMessage}
+        type={toastType}
         onDismiss={() => setToastMessage(null)}
       />
     </div>
   );
 }
+

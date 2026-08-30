@@ -569,5 +569,206 @@ class WorkoutViewModel(
         _uiState.value = _uiState.value.copy(selectedExerciseForHistory = null)
     }
 }`
+  },
+  {
+    filename: 'WorkoutScheduleEntity.kt',
+    category: 'Entity',
+    description: 'Room Entity for storing workout schedule days, target hours, and reminder notification offsets.',
+    code: `package com.calisthenics.progressiveoverload.data.local.entity
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * Entity WorkoutSchedule: id, day_of_week, day_name, time, reminder_minutes_before, is_enabled, exercise_focus
+ * Table: workout_schedules
+ */
+@Entity(tableName = "workout_schedules")
+data class WorkoutScheduleEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+
+    @ColumnInfo(name = "day_of_week")
+    val dayOfWeek: Int, // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+
+    @ColumnInfo(name = "day_name")
+    val dayName: String,
+
+    @ColumnInfo(name = "time")
+    val time: String, // HH:mm format e.g. "06:30"
+
+    @ColumnInfo(name = "reminder_minutes_before", defaultValue = "15")
+    val reminderMinutesBefore: Int = 15,
+
+    @ColumnInfo(name = "is_enabled", defaultValue = "1")
+    val isEnabled: Boolean = true,
+
+    @ColumnInfo(name = "exercise_focus")
+    val exerciseFocus: String = "Calisthenics Overload"
+)`
+  },
+  {
+    filename: 'WorkoutScheduleDao.kt',
+    category: 'Dao',
+    description: 'Room DAO for querying active workout schedules and configuring reminder alarms.',
+    code: `package com.calisthenics.progressiveoverload.data.local.dao
+
+import androidx.room.*
+import com.calisthenics.progressiveoverload.data.local.entity.WorkoutScheduleEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface WorkoutScheduleDao {
+
+    @Query("SELECT * FROM workout_schedules ORDER BY CASE WHEN day_of_week = 0 THEN 7 ELSE day_of_week END ASC, time ASC")
+    fun getAllSchedules(): Flow<List<WorkoutScheduleEntity>>
+
+    @Query("SELECT * FROM workout_schedules WHERE is_enabled = 1")
+    suspend fun getActiveSchedules(): List<WorkoutScheduleEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateSchedule(schedule: WorkoutScheduleEntity): Long
+
+    @Query("UPDATE workout_schedules SET is_enabled = :isEnabled WHERE id = :id")
+    suspend fun toggleSchedule(id: Long, isEnabled: Boolean)
+
+    @Delete
+    suspend fun deleteSchedule(schedule: WorkoutScheduleEntity)
+
+    @Query("DELETE FROM workout_schedules WHERE id = :id")
+    suspend fun deleteScheduleById(id: Long)
+}`
+  },
+  {
+    filename: 'WeeklyReportDao.kt',
+    category: 'Dao',
+    description: 'Room DAO queries for calculating weekly comparison matrix (This Week vs Last Week).',
+    code: `package com.calisthenics.progressiveoverload.data.local.dao
+
+import androidx.room.Dao
+import androidx.room.Query
+import com.calisthenics.progressiveoverload.data.local.entity.WorkoutLogEntity
+import com.calisthenics.progressiveoverload.data.local.entity.WorkoutSessionEntity
+
+data class ExerciseWeeklySum(
+    val exercise_id: Long,
+    val total_reps: Int,
+    val total_sets: Int
+)
+
+@Dao
+interface WeeklyReportDao {
+
+    @Query("""
+        SELECT * FROM workout_sessions 
+        WHERE start_time BETWEEN :startTime AND :endTime 
+        ORDER BY start_time DESC
+    """)
+    suspend fun getSessionsInRange(startTime: Long, endTime: Long): List<WorkoutSessionEntity>
+
+    @Query("""
+        SELECT * FROM workout_logs 
+        WHERE date BETWEEN :startTime AND :endTime 
+        ORDER BY date DESC
+    """)
+    suspend fun getLogsInRange(startTime: Long, endTime: Long): List<WorkoutLogEntity>
+
+    @Query("""
+        SELECT exercise_id, 
+               SUM(set_1_reps + set_2_reps + set_3_reps) as total_reps,
+               SUM(CASE WHEN set_1_reps > 0 THEN 1 ELSE 0 END +
+                   CASE WHEN set_2_reps > 0 THEN 1 ELSE 0 END +
+                   CASE WHEN set_3_reps > 0 THEN 1 ELSE 0 END) as total_sets
+        FROM workout_logs
+        WHERE date BETWEEN :startTime AND :endTime
+        GROUP BY exercise_id
+    """)
+    suspend fun getExerciseSumsInRange(startTime: Long, endTime: Long): List<ExerciseWeeklySum>
+}`
+  },
+  {
+    filename: 'WorkoutReminderWorker.kt',
+    category: 'UI (Compose)',
+    description: 'Android WorkManager & NotificationCompat builder for triggering scheduled workout alarms.',
+    code: `package com.calisthenics.progressiveoverload.worker
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.work.CoroutineWorker
+import androidx.work.WorkerParameters
+import com.calisthenics.progressiveoverload.MainActivity
+
+class WorkoutReminderWorker(
+    private val context: Context,
+    workerParams: WorkerParameters
+) : CoroutineWorker(context, workerParams) {
+
+    companion object {
+        const val CHANNEL_ID = "calisthenics_workout_reminders"
+        const val KEY_DAY_NAME = "key_day_name"
+        const val KEY_FOCUS = "key_focus"
+        const val KEY_MINUTES_BEFORE = "key_minutes_before"
+    }
+
+    override suspend fun doWork(): Result {
+        val dayName = inputData.getString(KEY_DAY_NAME) ?: "Hari Ini"
+        val focus = inputData.getString(KEY_FOCUS) ?: "Calisthenics Overload"
+        val minutesBefore = inputData.getInt(KEY_MINUTES_BEFORE, 15)
+
+        showNotification(dayName, focus, minutesBefore)
+        return Result.success()
+    }
+
+    private fun showNotification(dayName: String, focus: String, minutesBefore: Int) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Jadwal Latihan Kalistenik",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Pengingat jadwal latihan progressive overload"
+                enableVibration(true)
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notificationText = if (minutesBefore > 0) {
+            "Sesi $focus dimulai dalam $minutesBefore menit. Siapkan pull up bar & mental Anda!"
+        } else {
+            "Waktunya latihan $focus sekarang! Buka app & mulai timer sesi."
+        }
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("🏋️ Jadwal Latihan $dayName")
+            .setContentText(notificationText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(notificationText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(System.currentTimeMillis().toInt(), notification)
+    }
+}`
   }
 ];
+
